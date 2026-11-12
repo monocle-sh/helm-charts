@@ -1,0 +1,32 @@
+name: Lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+
+      # Every chart must build its dependencies, lint, and render with its required values.
+      - name: Lint and render
+        run: |
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          for chart in charts/*/; do
+            helm dependency build "$chart"
+            helm lint --strict "$chart" -f "$chart/ci/values.yaml"
+            helm template release "$chart" -f "$chart/ci/values.yaml" > /dev/null
+          done

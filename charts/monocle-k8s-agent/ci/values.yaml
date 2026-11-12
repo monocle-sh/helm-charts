@@ -1,0 +1,5 @@
+# Required values, so CI can lint and render the chart.
+monocle:
+  apiKey: ci
+  environment: production
+  clusterName: ci

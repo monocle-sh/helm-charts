@@ -1,0 +1,296 @@
+# Monocle connection. The collectors read these values from the `monocle-k8s-agent` Secret.
+monocle:
+  # Set to false to provide the `monocle-k8s-agent` Secret yourself, for example from a secret
+  # manager, with the keys apiKey, environment, endpoint and clusterName. The values below are
+  # then ignored.
+  createSecret: true
+  # Ingestion API key of any application in your organization. Required.
+  apiKey: ""
+  # Environment slug used to authenticate cluster telemetry, for example `production`. Required.
+  environment: ""
+  # Monocle OTLP/HTTP ingestion endpoint.
+  endpoint: https://ingest.monocle.sh
+  # Name shown in Monocle. Use one name per cluster. Required.
+  clusterName: ""
+
+# Node agent: kubelet metrics, container logs, and OTLP from workloads on the node.
+# Workloads send OTLP to the agent on their node with their own Monocle API key and environment
+# headers, as they would to Monocle; the agent adds Kubernetes metadata and forwards each request
+# with those headers only. They reach it through the agent Service, or on the node's host ports
+# 4317/4318 (status.hostIP) with their pod IP in k8s.pod.ip.
+agent:
+  enabled: true
+  mode: daemonset
+  # The upstream chart gives a DaemonSet's Service `internalTrafficPolicy: Local`: each pod reaches
+  # the agent on its own node, which sees the pod's IP and adds that pod's metadata. Host ports
+  # often hide it. A node whose agent is not running drops its workloads' telemetry.
+  service:
+    enabled: true
+  image:
+    repository: otel/opentelemetry-collector-contrib
+  command:
+    name: otelcol-contrib
+  presets:
+    kubernetesAttributes:
+      enabled: true
+    kubeletMetrics:
+      enabled: true
+    logsCollection:
+      enabled: true
+  extraEnvs: &monocleEnvs
+    - name: MONOCLE_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: monocle-k8s-agent
+          key: apiKey
+    - name: MONOCLE_ENVIRONMENT
+      valueFrom:
+        secretKeyRef:
+          name: monocle-k8s-agent
+          key: environment
+    - name: MONOCLE_ENDPOINT
+      valueFrom:
+        secretKeyRef:
+          name: monocle-k8s-agent
+          key: endpoint
+    - name: K8S_CLUSTER_NAME
+      valueFrom:
+        secretKeyRef:
+          name: monocle-k8s-agent
+          key: clusterName
+  ports: &ports
+    jaeger-compact:
+      enabled: false
+    jaeger-thrift:
+      enabled: false
+    jaeger-grpc:
+      enabled: false
+    zipkin:
+      enabled: false
+  # Limit and request utilization need pod specs from the kubelet; the preset only grants nodes/stats.
+  # Kubernetes 1.33+ checks nodes/pods. Older versions check nodes/proxy, which also allows exec into
+  # any pod through the kubelet, so they are not supported.
+  clusterRole:
+    rules:
+      - apiGroups: [""]
+        resources: [nodes/pods]
+        verbs: [get]
+  # Run on every node, including tainted control-plane nodes.
+  tolerations:
+    - operator: Exists
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  config:
+    extensions:
+      headers_setter: &clusterHeaders
+        headers:
+          - action: upsert
+            key: x-api-key
+            value: ${env:MONOCLE_API_KEY}
+          - action: upsert
+            key: x-monocle-env
+            value: ${env:MONOCLE_ENVIRONMENT}
+      # Forwards the API key and environment the workload sent, with no fallback: a request
+      # without them is refused by Monocle instead of being sent with the cluster's key.
+      headers_setter/workloads:
+        headers:
+          - action: upsert
+            key: x-api-key
+            from_context: x-api-key
+          - action: upsert
+            key: x-monocle-env
+            from_context: x-monocle-env
+    receivers:
+      jaeger: null
+      zipkin: null
+      prometheus: null
+      otlp:
+        protocols:
+          grpc:
+            include_metadata: true
+          http:
+            include_metadata: true
+      kubeletstats:
+        # 60s halves the stored points compared to 30s; Monocle charts use 1-minute buckets at most.
+        collection_interval: 60s
+        # Set to true only for kubelets with self-signed certificates without IP SANs (kind, minikube).
+        insecure_skip_verify: false
+        # Percentages of pod requests and limits are what Monocle shows; they are off upstream.
+        metrics:
+          k8s.pod.cpu_limit_utilization:
+            enabled: true
+          k8s.pod.cpu_request_utilization:
+            enabled: true
+          k8s.pod.memory_limit_utilization:
+            enabled: true
+          k8s.pod.memory_request_utilization:
+            enabled: true
+          # Unused by Monocle: inode counts and minor page faults.
+          k8s.volume.inodes:
+            enabled: false
+          k8s.volume.inodes.free:
+            enabled: false
+          k8s.volume.inodes.used:
+            enabled: false
+          container.memory.page_faults:
+            enabled: false
+          k8s.pod.memory.page_faults:
+            enabled: false
+          k8s.node.memory.page_faults:
+            enabled: false
+        # Monocle reads no per-container kubelet metric: limits, requests and restarts come from
+        # the cluster collector. The volume group adds k8s.volume.available/capacity per volume.
+        metric_groups: [node, pod, volume]
+        # Sets k8s.volume.type, and k8s.persistentvolumeclaim.name on claim volumes, from the pod spec.
+        extra_metadata_labels: [k8s.volume.type]
+    processors: &processors
+      # The preset also derives service.* from pod labels, which would turn every workload
+      # (kindnet, nginx, ...) into a Monocle service. Workloads are linked by k8s.* attributes instead.
+      k8s_attributes:
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.pod.name
+            - k8s.pod.uid
+            - k8s.pod.start_time
+            - k8s.node.name
+            - k8s.deployment.name
+            - k8s.replicaset.name
+            - k8s.statefulset.name
+            - k8s.daemonset.name
+            - k8s.job.name
+            - k8s.cronjob.name
+            - k8s.container.name
+            - container.image.name
+      resource/cluster:
+        attributes:
+          - key: k8s.cluster.name
+            value: ${env:K8S_CLUSTER_NAME}
+            action: upsert
+      # Config and token volumes report the size of the node disk, not their own, and Monocle
+      # ignores them. Projected volumes have no k8s.volume.type, so service account tokens match by name.
+      filter/config_volumes:
+        error_mode: ignore
+        metric_conditions:
+          - >-
+            IsMatch(metric.name, "^k8s\\.volume\\.") and
+            (resource.attributes["k8s.volume.type"] == "configMap" or
+            resource.attributes["k8s.volume.type"] == "secret" or
+            resource.attributes["k8s.volume.type"] == "downwardAPI" or
+            IsMatch(resource.attributes["k8s.volume.name"], "^kube-api-access-"))
+      # Keep one batch per sender so each keeps its own API key.
+      batch/workloads:
+        metadata_keys: [x-api-key, x-monocle-env]
+        metadata_cardinality_limit: 100
+    exporters:
+      debug: null
+      otlphttp/monocle: &monocleExporter
+        endpoint: ${env:MONOCLE_ENDPOINT}
+        auth:
+          authenticator: headers_setter
+      otlphttp/workloads:
+        endpoint: ${env:MONOCLE_ENDPOINT}
+        auth:
+          authenticator: headers_setter/workloads
+    service:
+      extensions: [health_check, headers_setter, headers_setter/workloads]
+      # memory_limiter comes first so data is refused before any work is done on it. Listing
+      # k8s_attributes stops the kubernetesAttributes preset from prepending it. The presets add
+      # kubeletstats to `metrics` and filelog to `logs`, which send with the cluster's key; the
+      # `*/workloads` pipelines carry OTLP from workloads with their own.
+      pipelines:
+        traces: null
+        metrics:
+          receivers: []
+          processors:
+            [memory_limiter, filter/config_volumes, k8s_attributes, resource/cluster, batch]
+          exporters: [otlphttp/monocle]
+        logs:
+          receivers: []
+          processors: [memory_limiter, k8s_attributes, resource/cluster, batch]
+          exporters: [otlphttp/monocle]
+        traces/workloads:
+          receivers: [otlp]
+          processors: [memory_limiter, k8s_attributes, resource/cluster, batch/workloads]
+          exporters: [otlphttp/workloads]
+        metrics/workloads:
+          receivers: [otlp]
+          processors: [memory_limiter, k8s_attributes, resource/cluster, batch/workloads]
+          exporters: [otlphttp/workloads]
+        logs/workloads:
+          receivers: [otlp]
+          processors: [memory_limiter, k8s_attributes, resource/cluster, batch/workloads]
+          exporters: [otlphttp/workloads]
+
+# Cluster collector: cluster state and Kubernetes events. Runs as a single replica.
+cluster:
+  enabled: true
+  mode: deployment
+  replicaCount: 1
+  image:
+    repository: otel/opentelemetry-collector-contrib
+  command:
+    name: otelcol-contrib
+  presets:
+    kubernetesAttributes:
+      enabled: true
+    clusterMetrics:
+      enabled: true
+    kubernetesEvents:
+      enabled: true
+      useK8sEventsReceiver: true
+  extraEnvs: *monocleEnvs
+  # Receives nothing over the network.
+  service:
+    enabled: false
+  ports:
+    <<: *ports
+    otlp:
+      enabled: false
+    otlp-http:
+      enabled: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  config:
+    extensions:
+      headers_setter: *clusterHeaders
+    receivers:
+      jaeger: null
+      zipkin: null
+      prometheus: null
+      otlp: null
+      k8s_cluster:
+        collection_interval: 60s
+        node_conditions_to_report: [Ready, MemoryPressure, DiskPressure, PIDPressure]
+        allocatable_types_to_report: [cpu, memory]
+        # Container status reasons are what Monocle turns into diagnoses (crash loops, OOM, image pulls).
+        metrics:
+          k8s.container.status.reason:
+            enabled: true
+        resource_attributes:
+          k8s.container.status.last_terminated_reason:
+            enabled: true
+    processors: *processors
+    exporters:
+      debug: null
+      otlphttp/monocle: *monocleExporter
+    service:
+      extensions: [health_check, headers_setter]
+      pipelines:
+        traces: null
+        metrics:
+          receivers: []
+          processors: [memory_limiter, k8s_attributes, resource/cluster, batch]
+          exporters: [otlphttp/monocle]
+        logs:
+          receivers: []
+          processors: [memory_limiter, k8s_attributes, resource/cluster, batch]
+          exporters: [otlphttp/monocle]

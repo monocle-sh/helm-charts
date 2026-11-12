@@ -1,0 +1,32 @@
+apiVersion: v2
+name: monocle-k8s-agent
+description: Kubernetes monitoring for Monocle. Collects cluster state, kubelet metrics, events and container logs, and adds pod metadata to your services' OpenTelemetry data.
+type: application
+version: 0.2.0
+appVersion: "0.163.2"
+kubeVersion: ">=1.33.0-0"
+home: https://monocle.sh
+icon: https://monocle.sh/web-app-manifest-512x512.png
+sources:
+  - https://github.com/monocle-sh/helm-charts
+  - https://github.com/open-telemetry/opentelemetry-helm-charts
+maintainers:
+  - name: Monocle
+    url: https://monocle.sh
+keywords:
+  - monocle
+  - kubernetes
+  - opentelemetry
+dependencies:
+  # One DaemonSet per node: kubelet metrics, container logs, and OTLP from workloads on that node.
+  - name: opentelemetry-collector
+    alias: agent
+    version: 0.177.0
+    repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+    condition: agent.enabled
+  # A single replica: cluster state (deployments, pods, nodes) and Kubernetes events.
+  - name: opentelemetry-collector
+    alias: cluster
+    version: 0.177.0
+    repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+    condition: cluster.enabled
