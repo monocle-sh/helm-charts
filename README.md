@@ -23,14 +23,10 @@ See each chart's README for its requirements and values.
 
 ## Release
 
-Bump `version` in the chart's `Chart.yaml`, merge it to `main`, then push a matching tag:
-
-```bash
-git tag monocle-k8s-agent-0.2.0 && git push origin monocle-k8s-agent-0.2.0
-```
-
-The `Release` workflow checks that the tag matches the chart version and points to a commit on
-`main`, then packages the chart and pushes it to `oci://ghcr.io/monocle-sh/charts/<chart>`.
+Bump `version` in the chart's `Chart.yaml` and merge the change to `main`. The `Release` workflow
+publishes every chart whose version is not released yet to `oci://ghcr.io/monocle-sh/charts/<chart>`,
+then tags the commit `<chart>-<version>` and creates a GitHub release with the packaged chart.
+Changes merged without a version bump wait for the next one.
 
 ## License
 
