@@ -1,8 +1,8 @@
-# Monocle connection. The collectors read the key from the `monocle-k8s-agent` Secret, and the
+# Monocle connection. The collectors read the key from the Secret named in `global.secret`, and the
 # endpoint and cluster name from the `monocle-k8s-agent` ConfigMap.
 monocle:
-  # Set to false to provide the `monocle-k8s-agent` Secret yourself, with the key under
-  # `apiKey`: created with kubectl, or synced from a secret manager so it stays out of Git.
+  # Set to false to provide the Secret yourself, under the name and key set in `global.secret`:
+  # created with kubectl, or synced from a secret manager so it stays out of Git.
   # `monocle.apiKey` is then ignored.
   createSecret: true
   # Key of this cluster, from "Connect a cluster" on Monocle's Kubernetes page. Cluster data
@@ -13,6 +13,31 @@ monocle:
   endpoint: https://ingest.monocle.sh
   # Name of this cluster in Monocle, as given when connecting it. Required.
   clusterName: ""
+
+# Options read by both collectors. Helm shares only `global` with the `agent` and `cluster` charts.
+global:
+  # Secret that holds the cluster key. The chart creates it unless `monocle.createSecret` is false.
+  secret:
+    name: monocle-k8s-agent
+    key: apiKey
+  # Container logs read by the agent on each node.
+  logs:
+    # Namespaces whose logs are skipped.
+    excludeNamespaces: [kube-system]
+    # When set, only these namespaces are read.
+    includeNamespaces: []
+    # Pods whose logs are skipped, as glob patterns on the pod name, such as `debug-*`.
+    excludePods: []
+    # Containers whose logs are skipped, as glob patterns on the container name, such as `istio-proxy`.
+    excludeContainers: []
+    # Lines dropped on the node, as regular expressions on the line, such as `^GET /healthz`.
+    dropPatterns: []
+    # Drops lines below this level: debug, info, warn, error or fatal. Lines whose level the agent
+    # cannot find are kept.
+    minSeverity: ""
+    # Joins indented lines, `Caused by:` and `... N more` to the line above, so a stack trace is
+    # one log record.
+    multiline: true
 
 # Node agent: kubelet metrics, container logs, and OTLP from workloads on the node.
 # Workloads send OTLP to the agent on their node with their own Monocle API key and environment
@@ -38,22 +63,36 @@ agent:
       enabled: true
     logsCollection:
       enabled: true
-  extraEnvs: &monocleEnvs
-    - name: MONOCLE_API_KEY
+  extraEnvs:
+    - &apiKeyEnv
+      name: MONOCLE_API_KEY
       valueFrom:
         secretKeyRef:
-          name: monocle-k8s-agent
-          key: apiKey
-    - name: MONOCLE_ENDPOINT
+          name: '{{ include "monocle-k8s-agent.secretName" . }}'
+          key: '{{ include "monocle-k8s-agent.secretKey" . }}'
+    - &endpointEnv
+      name: MONOCLE_ENDPOINT
       valueFrom:
         configMapKeyRef:
           name: monocle-k8s-agent
           key: endpoint
-    - name: K8S_CLUSTER_NAME
+    - &clusterNameEnv
+      name: K8S_CLUSTER_NAME
       valueFrom:
         configMapKeyRef:
           name: monocle-k8s-agent
           key: clusterName
+    # `global.logs`, rendered for the config below.
+    - name: MONOCLE_LOGS_INCLUDE
+      value: '{{ include "monocle-k8s-agent.logs.include" . }}'
+    - name: MONOCLE_LOGS_EXCLUDE
+      value: '{{ include "monocle-k8s-agent.logs.exclude" . }}'
+    - name: MONOCLE_LOGS_DROP
+      value: '{{ include "monocle-k8s-agent.logs.drop" . }}'
+    - name: MONOCLE_LOGS_MULTILINE
+      value: '{{ .Values.global.logs.multiline }}'
+    - name: MONOCLE_LOGS_SEVERITY
+      value: '{{ not (empty .Values.global.logs.minSeverity) }}'
   ports: &ports
     jaeger-compact:
       enabled: false
@@ -74,6 +113,36 @@ agent:
   # Run on every node, including tainted control-plane nodes.
   tolerations:
     - operator: Exists
+  # Read positions of container log files, kept on the node so a restarted or upgraded agent
+  # resumes where it stopped instead of skipping the lines written meanwhile. The collector runs as
+  # user 10001; the init container only gives it this directory.
+  initContainers:
+    - name: log-positions
+      image: busybox:1.37
+      command:
+        - chown
+        - '{{ .Values.securityContext.runAsUser | default 10001 }}:0'
+        - /var/lib/monocle-k8s-agent
+      securityContext:
+        runAsUser: 0
+        runAsNonRoot: false
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 16Mi
+      volumeMounts:
+        - name: log-positions
+          mountPath: /var/lib/monocle-k8s-agent
+  extraVolumes:
+    - name: log-positions
+      hostPath:
+        path: /var/lib/monocle-k8s-agent
+        type: DirectoryOrCreate
+  extraVolumeMounts:
+    - name: log-positions
+      mountPath: /var/lib/monocle-k8s-agent
   resources:
     requests:
       cpu: 50m
@@ -82,6 +151,8 @@ agent:
       memory: 512Mi
   config:
     extensions:
+      file_storage:
+        directory: /var/lib/monocle-k8s-agent
       headers_setter: &clusterHeaders
         headers:
           - action: upsert
@@ -101,6 +172,35 @@ agent:
       jaeger: null
       zipkin: null
       prometheus: null
+      # Merged into the logsCollection preset.
+      file_log:
+        include: ${env:MONOCLE_LOGS_INCLUDE}
+        exclude: ${env:MONOCLE_LOGS_EXCLUDE}
+        storage: file_storage
+        operators:
+          - type: container
+            id: container-parser
+            max_log_size: 102400
+          - type: recombine
+            id: multiline
+            if: ${env:MONOCLE_LOGS_MULTILINE}
+            combine_field: body
+            source_identifier: attributes["log.file.path"]
+            is_first_entry: body matches "^\\S" and not (body matches "^(Caused by:|\\.\\.\\. \\d+ more)")
+            force_flush_period: 1s
+            max_log_size: 102400
+          # For `global.logs.minSeverity`: the first `level`, `lvl` or `severity` field of a JSON or
+          # logfmt line sets the record's level. Container runtimes record none.
+          - type: regex_parser
+            id: severity
+            if: ${env:MONOCLE_LOGS_SEVERITY}
+            regex: '(?i)\b(?:level|lvl|severity)"?\s*[:=]\s*"?(?P<monocle_level>trace|debug|info|warn|warning|error|fatal)\b'
+            on_error: send_quiet
+            severity:
+              parse_from: attributes.monocle_level
+          - type: remove
+            if: attributes.monocle_level != nil
+            field: attributes.monocle_level
       otlp:
         protocols:
           grpc:
@@ -140,45 +240,58 @@ agent:
         metric_groups: [node, pod, volume]
         # Sets k8s.volume.type, and k8s.persistentvolumeclaim.name on claim volumes, from the pod spec.
         extra_metadata_labels: [k8s.volume.type]
-    processors: &processors
-      # The preset also derives service.* from pod labels, which would turn every workload
-      # (kindnet, nginx, ...) into a Monocle service. Workloads are linked by k8s.* attributes instead.
-      k8s_attributes:
-        extract:
-          metadata:
-            - k8s.namespace.name
-            - k8s.pod.name
-            - k8s.pod.uid
-            - k8s.pod.start_time
-            - k8s.node.name
-            - k8s.deployment.name
-            - k8s.replicaset.name
-            - k8s.statefulset.name
-            - k8s.daemonset.name
-            - k8s.job.name
-            - k8s.cronjob.name
-            - k8s.container.name
-            - container.image.name
-      resource/cluster:
-        attributes:
-          - key: k8s.cluster.name
-            value: ${env:K8S_CLUSTER_NAME}
-            action: upsert
-      # Config and token volumes report the size of the node disk, not their own, and Monocle
-      # ignores them. Projected volumes have no k8s.volume.type, so service account tokens match by name.
-      filter/config_volumes:
+    processors:
+      <<: &processors
+        # The preset also derives service.* from pod labels, which would turn every workload
+        # (kindnet, nginx, ...) into a Monocle service. Workloads are linked by k8s.* attributes instead.
+        k8s_attributes:
+          extract:
+            metadata:
+              - k8s.namespace.name
+              - k8s.pod.name
+              - k8s.pod.uid
+              - k8s.pod.start_time
+              - k8s.node.name
+              - k8s.deployment.name
+              - k8s.replicaset.name
+              - k8s.statefulset.name
+              - k8s.daemonset.name
+              - k8s.job.name
+              - k8s.cronjob.name
+              - k8s.container.name
+              - container.image.name
+            # Pods annotated `monocle.sh/logs: "false"` opt out of container log collection.
+            annotations:
+              - tag_name: monocle.logs
+                key: monocle.sh/logs
+                from: pod
+        resource/cluster:
+          attributes:
+            - key: k8s.cluster.name
+              value: ${env:K8S_CLUSTER_NAME}
+              action: upsert
+            # Read by `filter/logs` only.
+            - key: monocle.logs
+              action: delete
+        # Config and token volumes report the size of the node disk, not their own, and Monocle
+        # ignores them. Projected volumes have no k8s.volume.type, so service account tokens match by name.
+        filter/config_volumes:
+          error_mode: ignore
+          metric_conditions:
+            - >-
+              IsMatch(metric.name, "^k8s\\.volume\\.") and
+              (resource.attributes["k8s.volume.type"] == "configMap" or
+              resource.attributes["k8s.volume.type"] == "secret" or
+              resource.attributes["k8s.volume.type"] == "downwardAPI" or
+              IsMatch(resource.attributes["k8s.volume.name"], "^kube-api-access-"))
+        # Keep one batch per sender so each keeps its own API key.
+        batch/workloads:
+          metadata_keys: [x-api-key, x-monocle-env]
+          metadata_cardinality_limit: 100
+      # Container log lines dropped by `global.logs`, before they leave the node.
+      filter/logs:
         error_mode: ignore
-        metric_conditions:
-          - >-
-            IsMatch(metric.name, "^k8s\\.volume\\.") and
-            (resource.attributes["k8s.volume.type"] == "configMap" or
-            resource.attributes["k8s.volume.type"] == "secret" or
-            resource.attributes["k8s.volume.type"] == "downwardAPI" or
-            IsMatch(resource.attributes["k8s.volume.name"], "^kube-api-access-"))
-      # Keep one batch per sender so each keeps its own API key.
-      batch/workloads:
-        metadata_keys: [x-api-key, x-monocle-env]
-        metadata_cardinality_limit: 100
+        log_conditions: ${env:MONOCLE_LOGS_DROP}
     exporters:
       debug: null
       otlphttp/monocle: &monocleExporter
@@ -190,7 +303,7 @@ agent:
         auth:
           authenticator: headers_setter/workloads
     service:
-      extensions: [health_check, headers_setter, headers_setter/workloads]
+      extensions: [health_check, file_storage, headers_setter, headers_setter/workloads]
       # memory_limiter comes first so data is refused before any work is done on it. Listing
       # k8s_attributes stops the kubernetesAttributes preset from prepending it. The presets add
       # kubeletstats to `metrics` and filelog to `logs`, which send with the cluster's key; the
@@ -204,7 +317,7 @@ agent:
           exporters: [otlphttp/monocle]
         logs:
           receivers: []
-          processors: [memory_limiter, k8s_attributes, resource/cluster, batch]
+          processors: [memory_limiter, k8s_attributes, filter/logs, resource/cluster, batch]
           exporters: [otlphttp/monocle]
         traces/workloads:
           receivers: [otlp]
@@ -236,7 +349,7 @@ cluster:
     kubernetesEvents:
       enabled: true
       useK8sEventsReceiver: true
-  extraEnvs: *monocleEnvs
+  extraEnvs: [*apiKeyEnv, *endpointEnv, *clusterNameEnv]
   # Receives nothing over the network.
   service:
     enabled: false
