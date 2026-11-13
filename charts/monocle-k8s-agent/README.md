@@ -125,19 +125,3 @@ kubectl -n monocle rollout restart daemonset/monocle-agent-agent deployment/mono
 helm upgrade monocle-agent oci://ghcr.io/monocle-sh/charts/monocle-k8s-agent -n monocle --reuse-values
 helm uninstall monocle-agent -n monocle
 ```
-
-### Upgrade from 0.2
-
-Version 0.2 sent cluster data with a project key and an environment, which Monocle no longer shows.
-Connect the cluster on Monocle's Kubernetes page to get its key, then upgrade with it:
-
-```bash
-helm upgrade monocle-agent oci://ghcr.io/monocle-sh/charts/monocle-k8s-agent -n monocle \
-  --version 0.3.0 --reuse-values \
-  --set monocle.apiKey=<cluster key> \
-  --set-string monocle.clusterName=prod-eu
-```
-
-If you create the `monocle-k8s-agent` Secret yourself, keep only `apiKey` in it, with the cluster
-key. Set `monocle.clusterName`, and `monocle.endpoint` if you changed it, in the values: the chart
-no longer reads them from the Secret. `monocle.environment` is no longer used.
