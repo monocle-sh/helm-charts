@@ -38,6 +38,10 @@ global:
     # Joins indented lines, `Caused by:` and `... N more` to the line above, so a stack trace is
     # one log record.
     multiline: true
+  metrics:
+    # Scrapes the Prometheus metrics of pods annotated `prometheus.io/scrape: "true"`, on the port
+    # and path of their `prometheus.io/port` and `prometheus.io/path` annotations.
+    prometheusScrape: false
 
 # Node agent: kubelet metrics, container logs, and OTLP from workloads on the node.
 # Workloads send OTLP to the agent on their node with their own Monocle API key and environment
@@ -82,7 +86,7 @@ agent:
         configMapKeyRef:
           name: monocle-k8s-agent
           key: clusterName
-    # `global.logs`, rendered for the config below.
+    # `global.logs` and `global.metrics`, rendered for the config below.
     - name: MONOCLE_LOGS_INCLUDE
       value: '{{ include "monocle-k8s-agent.logs.include" . }}'
     - name: MONOCLE_LOGS_EXCLUDE
@@ -93,6 +97,8 @@ agent:
       value: '{{ .Values.global.logs.multiline }}'
     - name: MONOCLE_LOGS_SEVERITY
       value: '{{ not (empty .Values.global.logs.minSeverity) }}'
+    - name: MONOCLE_PROMETHEUS_RECEIVER
+      value: '{{ ternary "prometheus/annotations" "nop" .Values.global.metrics.prometheusScrape }}'
   ports: &ports
     jaeger-compact:
       enabled: false
@@ -172,6 +178,8 @@ agent:
       jaeger: null
       zipkin: null
       prometheus: null
+      # Stands in for `prometheus/annotations` when `global.metrics.prometheusScrape` is false.
+      nop: {}
       # Merged into the logsCollection preset.
       file_log:
         include: ${env:MONOCLE_LOGS_INCLUDE}
@@ -201,6 +209,42 @@ agent:
           - type: remove
             if: attributes.monocle_level != nil
             field: attributes.monocle_level
+      # Pods on this node annotated `prometheus.io/scrape: "true"`.
+      prometheus/annotations:
+        config:
+          scrape_configs:
+            - job_name: kubernetes-pods
+              scrape_interval: 60s
+              # Caps the series of one pod, which all count toward the organization's usage.
+              sample_limit: 10000
+              # Pods serve their own certificates, which do not name their IP.
+              tls_config:
+                insecure_skip_verify: true
+              kubernetes_sd_configs:
+                - role: pod
+                  selectors:
+                    - role: pod
+                      field: spec.nodeName=${env:K8S_NODE_NAME}
+              relabel_configs:
+                - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                  regex: "true"
+                  action: keep
+                - source_labels: [__meta_kubernetes_pod_phase]
+                  regex: Pending|Succeeded|Failed
+                  action: drop
+                - source_labels: [__meta_kubernetes_pod_container_init]
+                  regex: "true"
+                  action: drop
+                - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scheme]
+                  regex: (https?)
+                  target_label: __scheme__
+                - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+                  regex: (.+)
+                  target_label: __metrics_path__
+                - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+                  regex: ([^:]+)(?::\d+)?;(\d+)
+                  replacement: $$1:$$2
+                  target_label: __address__
       otlp:
         protocols:
           grpc:
@@ -288,6 +332,14 @@ agent:
         batch/workloads:
           metadata_keys: [x-api-key, x-monocle-env]
           metadata_cardinality_limit: 100
+      # Scraped pods are linked by k8s.* attributes, like every workload, not turned into services
+      # named after the scrape job.
+      resource/prometheus:
+        attributes:
+          - key: service.name
+            action: delete
+          - key: service.instance.id
+            action: delete
       # Container log lines dropped by `global.logs`, before they leave the node.
       filter/logs:
         error_mode: ignore
@@ -314,6 +366,10 @@ agent:
           receivers: []
           processors:
             [memory_limiter, filter/config_volumes, k8s_attributes, resource/cluster, batch]
+          exporters: [otlphttp/monocle]
+        metrics/prometheus:
+          receivers: ["${env:MONOCLE_PROMETHEUS_RECEIVER}"]
+          processors: [memory_limiter, k8s_attributes, resource/prometheus, resource/cluster, batch]
           exporters: [otlphttp/monocle]
         logs:
           receivers: []

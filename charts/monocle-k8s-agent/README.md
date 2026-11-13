@@ -133,25 +133,34 @@ The agent stores how far it has read each log file in `/var/lib/monocle-k8s-agen
 restarted or upgraded agent resumes from there, so it sends the lines written while it was down.
 An init container, the only part that runs as root, gives the agent's user that directory.
 
+## Scrape Prometheus metrics
+
+With `global.metrics.prometheusScrape=true`, the agent on each node scrapes the pods of that node
+annotated `prometheus.io/scrape: "true"` every 60 seconds. `prometheus.io/port` sets the port and
+`prometheus.io/path` the path, `/metrics` by default. The agent adds the pod, workload, namespace
+and node to each metric. A scrape of a pod keeps at most 10,000 series. Above that limit, the
+agent drops the whole scrape.
+
 ## Values
 
-| Value                           | Default                     | Description                                                            |
-| ------------------------------- | --------------------------- | ---------------------------------------------------------------------- |
-| `monocle.apiKey`                | `''`                        | Key of the cluster. Required unless `monocle.createSecret` is `false`. |
-| `monocle.clusterName`           | `''`                        | Name of the cluster in Monocle. Required.                              |
-| `monocle.endpoint`              | `https://ingest.monocle.sh` | Monocle OTLP/HTTP endpoint.                                            |
-| `monocle.createSecret`          | `true`                      | Set to `false` to provide the Secret yourself.                         |
-| `global.secret.name`            | `monocle-k8s-agent`         | Name of the Secret that holds the cluster key.                         |
-| `global.secret.key`             | `apiKey`                    | Key of the cluster key in that Secret.                                 |
-| `global.logs.excludeNamespaces` | `[kube-system]`             | Namespaces whose container logs are skipped.                           |
-| `global.logs.includeNamespaces` | `[]`                        | When set, the only namespaces whose container logs are read.           |
-| `global.logs.excludePods`       | `[]`                        | Glob patterns on pod names whose logs are skipped.                     |
-| `global.logs.excludeContainers` | `[]`                        | Glob patterns on container names whose logs are skipped.               |
-| `global.logs.dropPatterns`      | `[]`                        | Regular expressions. The agent drops the log lines that match.         |
-| `global.logs.minSeverity`       | `''`                        | Drops log lines below `debug`, `info`, `warn`, `error` or `fatal`.     |
-| `global.logs.multiline`         | `true`                      | Joins the lines of a stack trace into one log record.                  |
-| `agent.enabled`                 | `true`                      | Deploys the node agent DaemonSet.                                      |
-| `cluster.enabled`               | `true`                      | Deploys the cluster collector.                                         |
+| Value                             | Default                     | Description                                                            |
+| --------------------------------- | --------------------------- | ---------------------------------------------------------------------- |
+| `monocle.apiKey`                  | `''`                        | Key of the cluster. Required unless `monocle.createSecret` is `false`. |
+| `monocle.clusterName`             | `''`                        | Name of the cluster in Monocle. Required.                              |
+| `monocle.endpoint`                | `https://ingest.monocle.sh` | Monocle OTLP/HTTP endpoint.                                            |
+| `monocle.createSecret`            | `true`                      | Set to `false` to provide the Secret yourself.                         |
+| `global.secret.name`              | `monocle-k8s-agent`         | Name of the Secret that holds the cluster key.                         |
+| `global.secret.key`               | `apiKey`                    | Key of the cluster key in that Secret.                                 |
+| `global.logs.excludeNamespaces`   | `[kube-system]`             | Namespaces whose container logs are skipped.                           |
+| `global.logs.includeNamespaces`   | `[]`                        | When set, the only namespaces whose container logs are read.           |
+| `global.logs.excludePods`         | `[]`                        | Glob patterns on pod names whose logs are skipped.                     |
+| `global.logs.excludeContainers`   | `[]`                        | Glob patterns on container names whose logs are skipped.               |
+| `global.logs.dropPatterns`        | `[]`                        | Regular expressions. The agent drops the log lines that match.         |
+| `global.logs.minSeverity`         | `''`                        | Drops log lines below `debug`, `info`, `warn`, `error` or `fatal`.     |
+| `global.logs.multiline`           | `true`                      | Joins the lines of a stack trace into one log record.                  |
+| `global.metrics.prometheusScrape` | `false`                     | Scrapes the pods annotated `prometheus.io/scrape: "true"`.             |
+| `agent.enabled`                   | `true`                      | Deploys the node agent DaemonSet.                                      |
+| `cluster.enabled`                 | `true`                      | Deploys the cluster collector.                                         |
 
 `agent` and `cluster` accept every value of the upstream
 [opentelemetry-collector chart](https://github.com/open-telemetry/opentelemetry-helm-charts/tree/main/charts/opentelemetry-collector),
