@@ -1,5 +1,5 @@
 {{- $service := ternary .Release.Name (printf "%s-agent" .Release.Name) (contains "agent" .Release.Name) -}}
-The Monocle Kubernetes agent is installed{{ if .Values.monocle.createSecret }} for cluster "{{ .Values.monocle.clusterName }}"{{ end }}.
+The Monocle Kubernetes agent is installed for cluster "{{ .Values.monocle.clusterName }}".
 Cluster state, metrics, events and container logs appear in Monocle within a few minutes.
 {{- if .Values.agent.enabled }}
 
@@ -10,6 +10,7 @@ environment headers, as you would send it to Monocle:
   OTEL_EXPORTER_OTLP_HEADERS=x-api-key=<service key>,x-monocle-env=<environment>
 {{- end }}
 
-The collectors read the Secret only when they start. After you change the API key, restart them:
+The collectors read the key and the cluster name only when they start. After you change them,
+restart the collectors:
 
   kubectl -n {{ .Release.Namespace }} rollout restart daemonset/{{ .Release.Name }}-agent deployment/{{ .Release.Name }}-cluster

@@ -1,0 +1,12 @@
+{{- /* Both collectors read the endpoint and cluster name from this ConfigMap, under a fixed name. */ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: monocle-k8s-agent
+  labels:
+    app.kubernetes.io/name: monocle-k8s-agent
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+data:
+  endpoint: {{ required "monocle.endpoint is required" .Values.monocle.endpoint | quote }}
+  clusterName: {{ required "monocle.clusterName is required" .Values.monocle.clusterName | quote }}

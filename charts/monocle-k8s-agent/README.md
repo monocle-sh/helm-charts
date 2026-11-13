@@ -13,34 +13,36 @@ Kubernetes monitoring for [Monocle](https://monocle.sh). The chart runs two
 - Kubernetes 1.33 or later. The agent reads pod specs from the kubelet with the `nodes/pods`
   permission, which older versions do not check.
 - Helm 3.8 or later, for OCI charts.
-- A Monocle ingestion API key and the slug of the environment the cluster belongs to.
+- The key of the cluster: on Monocle's Kubernetes page, an organization admin connects the
+  cluster and gets this command with its key filled in.
 
 ## Install
 
 ```bash
 helm install monocle-agent oci://ghcr.io/monocle-sh/charts/monocle-k8s-agent \
   -n monocle --create-namespace \
-  --set monocle.apiKey=<ingestion key> \
-  --set monocle.environment=production \
-  --set monocle.clusterName=prod-eu
+  --set monocle.apiKey=<cluster key> \
+  --set-string monocle.clusterName=prod-eu
 ```
 
-Use one `clusterName` per cluster. Cluster state, metrics, events and logs appear in Monocle within
-a few minutes.
+Use the name the cluster was connected with. Its data belongs to the organization, not to a
+project or an environment: admins and members with access to every project see it. Cluster state,
+metrics, events and logs appear in Monocle within a few minutes.
 
 ### Keep the API key out of Helm values
 
-To create the Secret yourself, for example from a secret manager, create `monocle-k8s-agent` in the
-release namespace before installing, and set `monocle.createSecret=false`:
+With Argo CD, Flux or any values file kept in Git, keep the key in a Secret you create yourself:
+with kubectl, or synced from a secret manager by a tool such as External Secrets or Sealed
+Secrets. Create `monocle-k8s-agent` in the release namespace with the key under `apiKey`, then
+install with `monocle.createSecret=false`. The cluster name stays in the values:
 
 ```bash
-kubectl -n monocle create secret generic monocle-k8s-agent \
-  --from-literal=apiKey=<ingestion key> \
-  --from-literal=environment=production \
-  --from-literal=endpoint=https://ingest.monocle.sh \
-  --from-literal=clusterName=prod-eu
-helm install monocle-agent oci://ghcr.io/monocle-sh/charts/monocle-k8s-agent \
-  -n monocle --set monocle.createSecret=false
+kubectl create namespace monocle
+kubectl -n monocle create secret generic monocle-k8s-agent --from-literal=apiKey=<cluster key>
+helm upgrade --install monocle-agent oci://ghcr.io/monocle-sh/charts/monocle-k8s-agent \
+  -n monocle \
+  --set monocle.createSecret=false \
+  --set-string monocle.clusterName=prod-eu
 ```
 
 ## Send your services' telemetry through the agent
@@ -81,7 +83,7 @@ Where host ports are refused or taken, such as on GKE Autopilot, under a Pod Sec
 policy that forbids them, or when another agent holds 4317/4318, close them:
 
 ```bash
---set agent.ports.otlp.hostPort=null --set agent.ports.otlp-http.hostPort=null
+--set agent.ports.otlp.hostPort=0 --set agent.ports.otlp-http.hostPort=0
 ```
 
 Either way, a node whose agent is not running drops its services' telemetry until the agent is back.
@@ -90,9 +92,8 @@ Either way, a node whose agent is not running drops its services' telemetry unti
 
 | Value                  | Default                     | Description                                                                      |
 | ---------------------- | --------------------------- | -------------------------------------------------------------------------------- |
-| `monocle.apiKey`       | `''`                        | Ingestion API key. Required unless `monocle.createSecret` is `false`.            |
-| `monocle.environment`  | `''`                        | Environment slug of the cluster's own telemetry, such as `production`. Required. |
-| `monocle.clusterName`  | `''`                        | Name shown in Monocle, one per cluster. Required.                                |
+| `monocle.apiKey`       | `''`                        | Key of the cluster. Required unless `monocle.createSecret` is `false`.           |
+| `monocle.clusterName`  | `''`                        | Name of the cluster in Monocle. Required.                                        |
 | `monocle.endpoint`     | `https://ingest.monocle.sh` | Monocle OTLP/HTTP endpoint.                                                      |
 | `monocle.createSecret` | `true`                      | Set to `false` to provide the `monocle-k8s-agent` Secret yourself.               |
 | `agent.enabled`        | `true`                      | Deploys the node agent DaemonSet.                                                |
@@ -107,10 +108,12 @@ collector configuration.
 Clusters whose kubelets use self-signed certificates without IP SANs, such as kind or minikube, also
 need `--set agent.config.receivers.kubeletstats.insecure_skip_verify=true`.
 
-## Rotate the API key
+## Replace the API key
 
-The collectors read the Secret when they start, so restart them after changing the key, before you
-revoke the old one:
+On Monocle, click **New key…** in the menu of the cluster, in the Kubernetes tab of the
+organization settings. The old key stops working within 5 minutes. Put the new key in
+`monocle.apiKey`, or in the `monocle-k8s-agent` Secret, then restart the collectors, which read it
+only when they start:
 
 ```bash
 kubectl -n monocle rollout restart daemonset/monocle-agent-agent deployment/monocle-agent-cluster
@@ -122,3 +125,19 @@ kubectl -n monocle rollout restart daemonset/monocle-agent-agent deployment/mono
 helm upgrade monocle-agent oci://ghcr.io/monocle-sh/charts/monocle-k8s-agent -n monocle --reuse-values
 helm uninstall monocle-agent -n monocle
 ```
+
+### Upgrade from 0.2
+
+Version 0.2 sent cluster data with a project key and an environment, which Monocle no longer shows.
+Connect the cluster on Monocle's Kubernetes page to get its key, then upgrade with it:
+
+```bash
+helm upgrade monocle-agent oci://ghcr.io/monocle-sh/charts/monocle-k8s-agent -n monocle \
+  --version 0.3.0 --reuse-values \
+  --set monocle.apiKey=<cluster key> \
+  --set-string monocle.clusterName=prod-eu
+```
+
+If you create the `monocle-k8s-agent` Secret yourself, keep only `apiKey` in it, with the cluster
+key. Set `monocle.clusterName`, and `monocle.endpoint` if you changed it, in the values: the chart
+no longer reads them from the Secret. `monocle.environment` is no longer used.

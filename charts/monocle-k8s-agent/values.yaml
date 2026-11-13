@@ -1,16 +1,17 @@
-# Monocle connection. The collectors read these values from the `monocle-k8s-agent` Secret.
+# Monocle connection. The collectors read the key from the `monocle-k8s-agent` Secret, and the
+# endpoint and cluster name from the `monocle-k8s-agent` ConfigMap.
 monocle:
-  # Set to false to provide the `monocle-k8s-agent` Secret yourself, for example from a secret
-  # manager, with the keys apiKey, environment, endpoint and clusterName. The values below are
-  # then ignored.
+  # Set to false to provide the `monocle-k8s-agent` Secret yourself, with the key under
+  # `apiKey`: created with kubectl, or synced from a secret manager so it stays out of Git.
+  # `monocle.apiKey` is then ignored.
   createSecret: true
-  # Ingestion API key of any application in your organization. Required.
+  # Key of this cluster, from "Connect a cluster" on Monocle's Kubernetes page. Cluster data
+  # belongs to your organization, not to a project or an environment. Required unless
+  # `createSecret` is false.
   apiKey: ""
-  # Environment slug used to authenticate cluster telemetry, for example `production`. Required.
-  environment: ""
   # Monocle OTLP/HTTP ingestion endpoint.
   endpoint: https://ingest.monocle.sh
-  # Name shown in Monocle. Use one name per cluster. Required.
+  # Name of this cluster in Monocle, as given when connecting it. Required.
   clusterName: ""
 
 # Node agent: kubelet metrics, container logs, and OTLP from workloads on the node.
@@ -43,19 +44,14 @@ agent:
         secretKeyRef:
           name: monocle-k8s-agent
           key: apiKey
-    - name: MONOCLE_ENVIRONMENT
-      valueFrom:
-        secretKeyRef:
-          name: monocle-k8s-agent
-          key: environment
     - name: MONOCLE_ENDPOINT
       valueFrom:
-        secretKeyRef:
+        configMapKeyRef:
           name: monocle-k8s-agent
           key: endpoint
     - name: K8S_CLUSTER_NAME
       valueFrom:
-        secretKeyRef:
+        configMapKeyRef:
           name: monocle-k8s-agent
           key: clusterName
   ports: &ports
@@ -91,9 +87,6 @@ agent:
           - action: upsert
             key: x-api-key
             value: ${env:MONOCLE_API_KEY}
-          - action: upsert
-            key: x-monocle-env
-            value: ${env:MONOCLE_ENVIRONMENT}
       # Forwards the API key and environment the workload sent, with no fallback: a request
       # without them is refused by Monocle instead of being sent with the cluster's key.
       headers_setter/workloads:

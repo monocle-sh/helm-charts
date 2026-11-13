@@ -2,7 +2,7 @@ apiVersion: v2
 name: monocle-k8s-agent
 description: Kubernetes monitoring for Monocle. Collects cluster state, kubelet metrics, events and container logs, and adds pod metadata to your services' OpenTelemetry data.
 type: application
-version: 0.2.1
+version: 0.3.0
 appVersion: "0.163.2"
 kubeVersion: ">=1.33.0-0"
 home: https://monocle.sh
