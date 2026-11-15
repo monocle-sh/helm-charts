@@ -256,7 +256,9 @@ agent:
         collection_interval: 60s
         # Set to true only for kubelets with self-signed certificates without IP SANs (kind, minikube).
         insecure_skip_verify: false
-        # Percentages of pod requests and limits are what Monocle shows; they are off upstream.
+        # Percentages of requests and limits are what Monocle shows; they are off upstream. The
+        # kernel enforces limits per container, so a container can hit its own while its pod is far
+        # from the pod's total.
         metrics:
           k8s.pod.cpu_limit_utilization:
             enabled: true
@@ -265,6 +267,14 @@ agent:
           k8s.pod.memory_limit_utilization:
             enabled: true
           k8s.pod.memory_request_utilization:
+            enabled: true
+          k8s.container.cpu_limit_utilization:
+            enabled: true
+          k8s.container.cpu_request_utilization:
+            enabled: true
+          k8s.container.memory_limit_utilization:
+            enabled: true
+          k8s.container.memory_request_utilization:
             enabled: true
           # Unused by Monocle: inode counts and minor page faults.
           k8s.volume.inodes:
@@ -279,9 +289,9 @@ agent:
             enabled: false
           k8s.node.memory.page_faults:
             enabled: false
-        # Monocle reads no per-container kubelet metric: limits, requests and restarts come from
-        # the cluster collector. The volume group adds k8s.volume.available/capacity per volume.
-        metric_groups: [node, pod, volume]
+        # The container group adds each container's usage. Its limits, requests and restarts come
+        # from the cluster collector. The volume group adds k8s.volume.available/capacity per volume.
+        metric_groups: [container, node, pod, volume]
         # Sets k8s.volume.type, and k8s.persistentvolumeclaim.name on claim volumes, from the pod spec.
         extra_metadata_labels: [k8s.volume.type]
     processors:
@@ -433,9 +443,12 @@ cluster:
         collection_interval: 60s
         node_conditions_to_report: [Ready, MemoryPressure, DiskPressure, PIDPressure]
         allocatable_types_to_report: [cpu, memory]
-        # Container status reasons are what Monocle turns into diagnoses (crash loops, OOM, image pulls).
+        # Container and pod status reasons are what Monocle turns into diagnoses: crash loops, OOM,
+        # image pulls, evictions.
         metrics:
           k8s.container.status.reason:
+            enabled: true
+          k8s.pod.status_reason:
             enabled: true
         resource_attributes:
           k8s.container.status.last_terminated_reason:
