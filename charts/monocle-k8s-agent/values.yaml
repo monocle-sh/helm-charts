@@ -42,6 +42,11 @@ global:
     # Scrapes the Prometheus metrics of pods annotated `prometheus.io/scrape: "true"`, on the port
     # and path of their `prometheus.io/port` and `prometheus.io/path` annotations.
     prometheusScrape: false
+    # Collects only the metrics Monocle reads. About half of what the receivers send by default is
+    # never read: CPU time counters, container and pod filesystem sizes, available memory, major
+    # page faults, ReplicaSet and ResourceQuota state. Set to false to collect them too, for
+    # queries or dashboards of your own.
+    essentialOnly: true
 
 # Node agent: kubelet metrics, container logs, and OTLP from workloads on the node.
 # Workloads send OTLP to the agent on their node with their own Monocle API key and environment
@@ -99,6 +104,10 @@ agent:
       value: '{{ not (empty .Values.global.logs.minSeverity) }}'
     - name: MONOCLE_PROMETHEUS_RECEIVER
       value: '{{ ternary "prometheus/annotations" "nop" .Values.global.metrics.prometheusScrape }}'
+    # `enabled` of the metrics `global.metrics.essentialOnly` turns off.
+    - &allMetricsEnv
+      name: MONOCLE_ALL_METRICS
+      value: '{{ not .Values.global.metrics.essentialOnly }}'
   ports: &ports
     jaeger-compact:
       enabled: false
@@ -270,8 +279,6 @@ agent:
             enabled: true
           k8s.container.cpu_limit_utilization:
             enabled: true
-          k8s.container.cpu_request_utilization:
-            enabled: true
           k8s.container.memory_limit_utilization:
             enabled: true
           k8s.container.memory_request_utilization:
@@ -289,6 +296,40 @@ agent:
             enabled: false
           k8s.node.memory.page_faults:
             enabled: false
+          # Unread by Monocle, off with `global.metrics.essentialOnly`. RSS stays: it splits a
+          # database's working set between process memory and file cache.
+          k8s.container.cpu_request_utilization:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          container.cpu.time:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          container.filesystem.available:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          container.filesystem.capacity:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          container.filesystem.usage:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          container.memory.available:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          container.memory.major_page_faults:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.pod.cpu.time:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.pod.filesystem.available:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.pod.filesystem.capacity:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.pod.memory.available:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.node.cpu.time:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.node.filesystem.available:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.node.memory.available:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.node.memory.major_page_faults:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.node.memory.usage:
+            enabled: ${env:MONOCLE_ALL_METRICS}
         # The container group adds each container's usage. Its limits, requests and restarts come
         # from the cluster collector. The volume group adds k8s.volume.available/capacity per volume.
         metric_groups: [container, node, pod, volume]
@@ -415,7 +456,7 @@ cluster:
     kubernetesEvents:
       enabled: true
       useK8sEventsReceiver: true
-  extraEnvs: [*apiKeyEnv, *endpointEnv, *clusterNameEnv]
+  extraEnvs: [*apiKeyEnv, *endpointEnv, *clusterNameEnv, *allMetricsEnv]
   # Receives nothing over the network.
   service:
     enabled: false
@@ -450,10 +491,40 @@ cluster:
             enabled: true
           k8s.pod.status_reason:
             enabled: true
+          # Unread by Monocle, off with `global.metrics.essentialOnly`. Kubernetes keeps 10 old
+          # ReplicaSets per Deployment, at 0 replicas: Monocle reads the Deployment instead.
+          k8s.replicaset.desired:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.replicaset.available:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.namespace.phase:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.job.max_parallel_pods:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.statefulset.current_pods:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.statefulset.updated_pods:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.daemonset.current_scheduled_nodes:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.daemonset.misscheduled_nodes:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.resource_quota.hard_limit:
+            enabled: ${env:MONOCLE_ALL_METRICS}
+          k8s.resource_quota.used:
+            enabled: ${env:MONOCLE_ALL_METRICS}
         resource_attributes:
           k8s.container.status.last_terminated_reason:
             enabled: true
-    processors: *processors
+    processors:
+      <<: *processors
+      # `k8s.container.status.reason` sends every possible reason each scrape, and only the
+      # current one is not 0. Monocle reads a reason as current when the container's latest
+      # scrape reports it, so the zeros are dropped, as kube-state-metrics never sends them.
+      filter/reason_zeros:
+        error_mode: ignore
+        metric_conditions:
+          - metric.name == "k8s.container.status.reason" and datapoint.value_int == 0
     exporters:
       debug: null
       otlphttp/monocle: *monocleExporter
@@ -463,7 +534,7 @@ cluster:
         traces: null
         metrics:
           receivers: []
-          processors: [memory_limiter, k8s_attributes, resource/cluster, batch]
+          processors: [memory_limiter, filter/reason_zeros, k8s_attributes, resource/cluster, batch]
           exporters: [otlphttp/monocle]
         logs:
           receivers: []

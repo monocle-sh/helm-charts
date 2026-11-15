@@ -100,6 +100,7 @@ restart loses no lines. A root init container gives the collector that directory
 | `global.logs.minSeverity`         | `''`                        | Drops lines below `debug`, `info`, `warn`, `error` or `fatal`.                                          |
 | `global.logs.multiline`           | `true`                      | Joins the lines of a stack trace into one record.                                                       |
 | `global.metrics.prometheusScrape` | `false`                     | Scrapes pods annotated `prometheus.io/scrape: "true"` every 60 seconds, up to 10,000 series per scrape. |
+| `global.metrics.essentialOnly`    | `true`                      | Collects only the metrics Monocle reads, about half of the receivers' defaults. Set to `false` to collect them all. |
 | `agent.enabled`                   | `true`                      | Deploys the node agent.                                                                                 |
 | `cluster.enabled`                 | `true`                      | Deploys the cluster collector.                                                                          |
 
